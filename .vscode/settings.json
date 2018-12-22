@@ -1,0 +1,6 @@
+{
+    "terminal.integrated.env.linux": {
+        "IDF_PATH": "${workspaceFolder}/../../esp-idf",
+        "PATH": "${env:PATH}:${workspaceFolder}/../../xtensa-esp32-elf/bin/"
+    }
+}
