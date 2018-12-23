@@ -62,7 +62,15 @@ extern void epaper_uninit(void);
 
 extern void epaper_wakeup(void);
 extern void epaper_clear(void);
-extern void epaper_display(uint8_t* image);
+extern void epaper_display(void* image);
 extern void epaper_sleep(void);
 
+extern void refresh();
+extern void clear(int color);
+extern void set_pixel(int x, int y, int color);
+extern void draw_line(int x0, int y0, int x1, int y1, int color);
+extern void draw_circle(int xc, int yc, int r, int color);
+extern void draw_filled_circle(int xc, int yc, int r, int color);
+extern void draw_rect(int x0, int y0, int x1, int y1, int color);
+extern void draw_filled_rect(int x0, int y0, int x1, int y1, int color);
 #endif
