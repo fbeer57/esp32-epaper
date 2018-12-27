@@ -1,20 +1,27 @@
+/*
+ * Copyright 2018 <copyright holder> <email>
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+#include <stdlib.h>
 #include <string.h>
-
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "esp_system.h"
-#include "soc/gpio_struct.h"
-#include "driver/gpio.h"
-#include "driver/spi_master.h"
-
+#include <math.h>
 #include "epaper.h"
 
-const int spi_dma_channel = 1;
-#define row_length (EPD_WIDTH >> 3)
-#define framebuffer_length (EPD_HEIGHT * ((EPD_WIDTH + 7) / 8))
-static uint8_t framebuffer[framebuffer_length];
-
 #define order(a, b) if (a > b) { int c = a; a = b; b = c; }
+#define set_bitmask(p, mask, color) if (color) { *p |= mask; } else { *p &= ~mask; } 
+
+uint8_t framebuffer[EPD_BYTES];
 
 void set_pixel(int x, int y, int color)
 {
@@ -25,26 +32,12 @@ void set_pixel(int x, int y, int color)
 
     int pos = (y * EPD_WIDTH + x) / 8;
     uint8_t bitmask = 0x80 >> (x & 0x7);
-    if (color)
-    {
-        framebuffer[pos] |= bitmask;
-    }
-    else
-    {
-        framebuffer[pos] &= ~bitmask;
-    }
+    set_bitmask((framebuffer + pos), bitmask, color);
 }
 
 void clear(int color)
 {
-    memset(framebuffer, color? 0xff : 0x00, framebuffer_length);
-}
-
-void refresh()
-{
-    epaper_wakeup();
-    epaper_display((void*)(framebuffer));
-    epaper_sleep();
+    memset(framebuffer, color? 0xff : 0x00, sizeof(framebuffer));
 }
 
 static int clip(int a, int m)
@@ -58,47 +51,36 @@ static void hLine(int x0, int x1, int y, int color)
     x1 = clip(x1, EPD_WIDTH);
     y =  clip(y, EPD_HEIGHT);
     order(x0, x1);
-
-    uint8_t* p = framebuffer + y * row_length;
+    ++x1;
+    
+    uint8_t* p = framebuffer + y * EPD_BYTES_PER_ROW;
     uint8_t* end = p + (x1 >> 3);
     p += (x0 >> 3);
 
-    int fillStart = x0 & 0x7;
-    if (fillStart)
+    uint8_t startByte = 0xff >> (x0 & 0x7);
+    uint8_t endByte = ~(0xff >> (x1 & 0x7));
+    
+    if (startByte != 0xff)
     {
-        if (color)
+        if (p == end)
         {
-            *p |= (0xff >> fillStart);            
+            startByte &= endByte;
+            endByte = 0x00;
         }
-        else
-        {
-            *p &= ~(0xff >> fillStart);            
-        }
+        set_bitmask(p, startByte, color);
         ++p;
     }
-    if (x0 == x1)
-    {
-        return;
-    }
+    
     uint8_t fill = (color)? 0xff : 0x00;
     while(p < end)
     {
-        *p = fill;
-        ++p;
-    }
-    int fillEnd = x1 & 0x7;
-    if (fillEnd) 
-    {
-        if (color)
-        {
-            *p |= ~(0xff >> fillEnd);            
-        }
-        else
-        {
-            *p &= (0xff >> fillEnd);            
-        }
+        *p++ = fill;
     }
 
+    if (endByte)
+    {
+        set_bitmask(p, endByte, color);
+    }
 }
 
 static void vLine(int x, int y0, int y1, int color)
@@ -107,24 +89,25 @@ static void vLine(int x, int y0, int y1, int color)
     y0 = clip(y0, EPD_HEIGHT);
     y1 = clip(y1, EPD_HEIGHT);
     order(y0, y1);
-    uint8_t* p =   framebuffer + y0 * row_length + (x >> 3);
-    uint8_t* end = framebuffer + y1 * row_length + (x >> 3);
+    uint8_t* p =   framebuffer + y0 * EPD_BYTES_PER_ROW + (x >> 3);
+    uint8_t* end = framebuffer + y1 * EPD_BYTES_PER_ROW + (x >> 3);
     uint8_t fill = 0x80 >> (x & 0x7);
-    if (!color)
+    if (color)
+    {
+        while(p <= end)
+        {
+            *p |= fill; 
+            p += EPD_BYTES_PER_ROW;
+        }
+    }
+    else
     {
         fill = ~fill;
-    }
-    while(p < end)
-    {
-        if (color)
+        while(p <= end)
         {
-            *p |= fill;
+            *p &= fill; 
+            p += EPD_BYTES_PER_ROW;
         }
-        else
-        {
-            *p &= fill;
-        }
-        p += row_length;
     }
 }
 
@@ -291,235 +274,54 @@ void draw_rect(int x0, int y0, int x1, int y1, int color)
     hLine(x0, x1, y1, color);
 }
 
-static spi_device_handle_t epaper_spi;
-
-DRAM_ATTR static uint8_t lut_vcom0[] =
+int draw_glyph(uint8_t ch, int x0, int y0, int color, const lv_font_t* font_p)
 {
-    0x00, 0x17, 0x00, 0x00, 0x00, 0x02,        
-    0x00, 0x17, 0x17, 0x00, 0x00, 0x02,        
-    0x00, 0x0A, 0x01, 0x00, 0x00, 0x01,        
-    0x00, 0x0E, 0x0E, 0x00, 0x00, 0x02,        
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,        
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,        
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-};
-
-DRAM_ATTR static uint8_t lut_ww[] ={
-    0x40, 0x17, 0x00, 0x00, 0x00, 0x02,
-    0x90, 0x17, 0x17, 0x00, 0x00, 0x02,
-    0x40, 0x0A, 0x01, 0x00, 0x00, 0x01,
-    0xA0, 0x0E, 0x0E, 0x00, 0x00, 0x02,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-};
-
-DRAM_ATTR static uint8_t lut_bw[] ={
-    0x40, 0x17, 0x00, 0x00, 0x00, 0x02,
-    0x90, 0x17, 0x17, 0x00, 0x00, 0x02,
-    0x40, 0x0A, 0x01, 0x00, 0x00, 0x01,
-    0xA0, 0x0E, 0x0E, 0x00, 0x00, 0x02,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-};
-
-DRAM_ATTR static uint8_t lut_wb[] ={
-    0x80, 0x17, 0x00, 0x00, 0x00, 0x02,
-    0x90, 0x17, 0x17, 0x00, 0x00, 0x02,
-    0x80, 0x0A, 0x01, 0x00, 0x00, 0x01,
-    0x50, 0x0E, 0x0E, 0x00, 0x00, 0x02,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-};
-
-DRAM_ATTR static uint8_t lut_bb[] ={
-    0x80, 0x17, 0x00, 0x00, 0x00, 0x02,
-    0x90, 0x17, 0x17, 0x00, 0x00, 0x02,
-    0x80, 0x0A, 0x01, 0x00, 0x00, 0x01,
-    0x50, 0x0E, 0x0E, 0x00, 0x00, 0x02,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-};
-
-static void spi_pre_transfer_callback(spi_transaction_t *trans)
-{
-    gpio_set_level(EPD_PIN_DC, trans->user? 1 : 0);
-}
-
-static void spi_post_transfer_callback(spi_transaction_t *trans)
-{
-}
-
-static void task_delay_ms(int ms)
-{
-    vTaskDelay(ms / portTICK_PERIOD_MS);    
-}
-
-void epaper_init(void)
-{
-    spi_bus_config_t buscfg = {
-        .miso_io_num = (-1),
-        .mosi_io_num = EPD_PIN_DIN,
-        .sclk_io_num = EPD_PIN_CLK,
-        .quadwp_io_num = (-1),
-        .quadhd_io_num = (-1),
-        .max_transfer_sz = framebuffer_length
-    };
-
-    spi_device_interface_config_t devcfg = {
-        .clock_speed_hz = 4000000,              // Clock out at 4 MHz
-        .mode = 0,                              // SPI mode 0
-        .spics_io_num = EPD_PIN_CS,             // CS pin
-        .queue_size = 7,                        // We want to be able to queue 7 transactions at a time
-        .flags = (SPI_DEVICE_HALFDUPLEX|SPI_DEVICE_3WIRE),
-        .pre_cb = spi_pre_transfer_callback,    // Specify pre-transfer callback to handle D/C line
-        .post_cb = spi_post_transfer_callback,  // Specify post-transfer callback
-    };
-
-    esp_err_t ret;
-    // Initialize the SPI bus
-    ret = spi_bus_initialize(VSPI_HOST, &buscfg, spi_dma_channel);
-    assert(ret == ESP_OK);
-    // Attach the EPD to the SPI bus
-    ret = spi_bus_add_device(VSPI_HOST, &devcfg, &epaper_spi);
-    assert(ret == ESP_OK);
-
-    gpio_set_direction(EPD_PIN_RST, GPIO_MODE_OUTPUT);
-    gpio_set_direction(EPD_PIN_DC, GPIO_MODE_OUTPUT);
-    gpio_set_direction(EPD_PIN_BUSY, GPIO_MODE_INPUT);
-}
-
-
-static void epaper_wait(void) 
-{
-    do 
+    int fontWidth = lv_font_get_width(font_p, ch);
+    if (fontWidth < 0)
     {
-        task_delay_ms(200);
+        return x0;
     }
-    while(!gpio_get_level(EPD_PIN_BUSY));
-}
+    int fontHeight = font_p->h_px;
 
-static void epaper_reset()
-{
-    task_delay_ms(200);
-    gpio_set_level(EPD_PIN_RST, 0);
-    task_delay_ms(200);
-    gpio_set_level(EPD_PIN_RST, 1);
-    task_delay_ms(200);
-}
-
-static void send_data(const void* bytes, uint32_t length)
-{
-    esp_err_t ret;
-    spi_transaction_t t;
-
-    if (length > 0)
+    if (x0 + fontWidth >= 0)
     {
-        memset(&t, 0, sizeof(t));                   // Zero out the transaction
-        t.length = length << 3;                     // Len is in bytes, transaction length is in bits.
-        t.tx_buffer = bytes;                        // Data
-        t.user = (void*)1;                          // D/C needs to be set to 1
-        ret = spi_device_transmit(epaper_spi, &t);  // Transmit!
-        assert(ret == ESP_OK);                      // Should have had no issues.
-    }
-}
+        y0 = clip(y0, EPD_HEIGHT);
 
-static void send_command(uint8_t cmd) 
-{
-    esp_err_t ret;
-    spi_transaction_t t;
-
-    memset(&t, 0, sizeof(t));                   // Zero out the transaction
-    t.length = 8;                               // Command is 8 bits
-    t.tx_buffer = &cmd;                         // The data is the cmd itself
-    t.user = (void*)0;                          // D/C needs to be set to 0
-    ret = spi_device_transmit(epaper_spi, &t);  // Transmit!
-    assert(ret == ESP_OK);                      // Should have had no issues.
-}
-
-#define SEND_COMMAND(cmd, ...) \
-{ \
-    DRAM_ATTR static uint8_t _data_bytes[] = __VA_ARGS__; \
-    send_command(cmd);  \
-    send_data(_data_bytes, sizeof(_data_bytes)/sizeof(uint8_t)); \
-}
-
-#define SEND_LUT(cmd, lut) \
-{ \
-    send_command(cmd);  \
-    send_data(lut, sizeof(lut)/sizeof(uint8_t)); \
-}
-
-static void epaper_refresh()
-{
-    send_command(DISPLAY_REFRESH);
-    epaper_wait();
-}
-
-void epaper_wakeup(void)
-{
-    epaper_reset();
-
-    SEND_COMMAND(POWER_SETTING, {0x03, 0x00, 0x2b, 0x2b});
-    SEND_COMMAND(BOOSTER_SOFT_START, {0x17, 0x17, 0x17});
-    send_command(POWER_ON);
-    epaper_wait();
-
-    SEND_COMMAND(PANEL_SETTING, {0xbf, 0x0d});
-    SEND_COMMAND(PLL_CONTROL, {0x3c});
-    SEND_COMMAND(RESOLUTION_SETTING, {0x01, 0x90, 0x01, 0x2c});
-    SEND_COMMAND(VCM_DC_SETTING, {0x28});
-    SEND_COMMAND(VCOM_AND_DATA_INTERVAL_SETTING, {0x97});
-
-    SEND_LUT(LUT_FOR_VCOM, lut_vcom0);
-    SEND_LUT(LUT_WHITE_TO_WHITE, lut_ww);
-    SEND_LUT(LUT_BLACK_TO_WHITE, lut_bw);
-    SEND_LUT(LUT_WHITE_TO_BLACK, lut_wb);
-    SEND_LUT(LUT_BLACK_TO_BLACK, lut_bb);
-}
-
-void epaper_sleep(void)
-{
-    send_command(POWER_OFF);
-    epaper_wait();
-    SEND_COMMAND(DEEP_SLEEP, {0xa5});
-}
-
-void epaper_clear(void)
-{
-    const int width = (EPD_WIDTH + 7) / 8;
-    static uint8_t white = 0xff;
-    send_command(DATA_START_TRANSMISSION_1);
-    for(int row = 0; row < EPD_HEIGHT; ++row)
-    {
-        for(int col = 0; col < width; ++col)
+        const uint8_t* glyph = lv_font_get_bitmap(font_p, ch);
+        uint8_t* p = framebuffer + EPD_BYTES_PER_ROW*y0 + (x0 >> 3);
+        int shift = 8 - (x0 & 0x7);
+        for(int i = 0; i < fontHeight; ++i)
         {
-            send_data(&white, 1);
+            if (y0 + i >= EPD_HEIGHT) break;
+            
+            uint8_t* dest = p + EPD_BYTES_PER_ROW*i;
+            int stride = (fontWidth + 7) >> 3;
+            int x = x0;
+            for(int j = 0; j < stride; ++j)
+            {
+                uint16_t bits = glyph[i*stride + j] << shift;
+                uint8_t hiByte = (bits >> 8) & 0xff;
+                if (hiByte && x >= 0)
+                {
+                    set_bitmask(dest, hiByte, color);
+                }
+                ++dest;
+                x += 8;
+                uint8_t loByte = (bits & 0xff);
+                if (loByte && x >= 0 && x < EPD_WIDTH)
+                {
+                    set_bitmask(dest, loByte, color);
+                }
+            }
         }
     }
-
-    send_command(DATA_START_TRANSMISSION_2);
-    for(int row = 0; row < EPD_HEIGHT; ++row)
-    {
-        for(int col = 0; col < width; ++col)
-        {
-            send_data(&white, 1);
-        }
-    }
-
-    epaper_refresh();
+    return x0 + fontWidth;
 }
 
-void epaper_display(void* framebuffer) 
+void draw_text(const char* text, int x0, int y0, int color, const lv_font_t * font_p, int xoff, int yoff)
 {
-    send_command(DATA_START_TRANSMISSION_1);
-    send_data(framebuffer, framebuffer_length);
-
-    send_command(DATA_START_TRANSMISSION_2);
-    send_data(framebuffer, framebuffer_length);
-
-    epaper_refresh();
+    for(const uint8_t* pc = (const uint8_t*)text; *pc && x0 < EPD_WIDTH; pc++)
+    {
+        x0 = xoff + draw_glyph(*pc, x0, y0, color, font_p);
+    }
 }
