@@ -1,4 +1,5 @@
-# Template
+# ESP32 Waveshare 4.2in EPaper SPI interface and drawing primitives
 
-C++ example which starts a "Hello World" FreeRTOS tasks
+The embedded fonts and accompanying functions have been taken from https://github.com/littlevgl/lvgl
+
 
