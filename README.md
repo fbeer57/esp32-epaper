@@ -1,5 +1,3 @@
-# Waveshare e-paper with a few graphics primitives
+# ESP32 Waveshare 4.2in EPaper SPI interface and drawing primitives
 
-Example to send a framebuffer to a 4.2 Waveshare e-paper panel and provide a few drawing primitives.
-
-
+The embedded fonts and accompanying functions have been taken from https://github.com/littlevgl/lvgl
