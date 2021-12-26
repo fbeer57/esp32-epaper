@@ -120,7 +120,8 @@
                 ],
                 "limitSymbolsToIncludedHeaders": true,
                 "databaseFilename": ""
-            }
+            },
+            "compileCommands": "${workspaceFolder}/build/compile_commands.json"
         },
         {
             "name": "Win32",
